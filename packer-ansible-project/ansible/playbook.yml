@@ -1,0 +1,161 @@
+---
+- name: Deploy Flask Application with Nginx and PostgreSQL
+  hosts: all
+  become: yes
+  vars:
+    app_dir: /opt/flask-app
+    app_user: flaskapp
+    db_name: flaskdb
+    db_user: flaskuser
+    db_password: flaskpass
+
+  tasks:
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install required packages
+      apt:
+        name:
+          - python3
+          - python3-pip
+          - python3-venv
+          - nginx
+          - postgresql
+          - postgresql-contrib
+          - libpq-dev
+          - python3-psycopg2
+        state: present
+
+    - name: Create application user
+      user:
+        name: "{{ app_user }}"
+        system: yes
+        shell: /bin/bash
+        home: "{{ app_dir }}"
+        create_home: yes
+
+    - name: Create application directory
+      file:
+        path: "{{ app_dir }}"
+        state: directory
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: '0755'
+
+    - name: Copy Flask application
+      copy:
+        src: flask-app/
+        dest: "{{ app_dir }}/"
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: '0644'
+
+    - name: Create virtual environment
+      command: python3 -m venv {{ app_dir }}/venv
+      args:
+        creates: "{{ app_dir }}/venv"
+
+    - name: Set ownership of venv
+      file:
+        path: "{{ app_dir }}/venv"
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        recurse: yes
+
+    - name: Install Python dependencies
+      pip:
+        requirements: "{{ app_dir }}/requirements.txt"
+        virtualenv: "{{ app_dir }}/venv"
+
+    - name: Start and enable PostgreSQL
+      systemd:
+        name: postgresql
+        state: started
+        enabled: yes
+
+    - name: Create PostgreSQL database
+      shell: |
+        sudo -u postgres psql -tc "SELECT 1 FROM pg_database WHERE datname = '{{ db_name }}'" | grep -q 1 || sudo -u postgres psql -c "CREATE DATABASE {{ db_name }};"
+      args:
+        executable: /bin/bash
+
+    - name: Create PostgreSQL user
+      shell: |
+        sudo -u postgres psql -tc "SELECT 1 FROM pg_roles WHERE rolname = '{{ db_user }}'" | grep -q 1 || sudo -u postgres psql -c "CREATE USER {{ db_user }} WITH PASSWORD '{{ db_password }}';"
+      args:
+        executable: /bin/bash
+
+    - name: Grant privileges to PostgreSQL user
+      shell: |
+        sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE {{ db_name }} TO {{ db_user }};"
+      args:
+        executable: /bin/bash
+
+    - name: Create tasks table
+      shell: |
+        sudo -u postgres psql -d {{ db_name }} -c "
+        CREATE TABLE IF NOT EXISTS tasks (
+            id SERIAL PRIMARY KEY,
+            title VARCHAR(255) NOT NULL,
+            completed BOOLEAN DEFAULT FALSE
+        );"
+      args:
+        executable: /bin/bash
+
+    - name: Grant table permissions to app user
+      shell: |
+        sudo -u postgres psql -d {{ db_name }} -c "GRANT ALL PRIVILEGES ON TABLE tasks TO {{ db_user }};"
+        sudo -u postgres psql -d {{ db_name }} -c "GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO {{ db_user }};"
+      args:
+        executable: /bin/bash
+
+    - name: Copy Gunicorn systemd service
+      template:
+        src: gunicorn.service.j2
+        dest: /etc/systemd/system/gunicorn.service
+      notify: Restart Gunicorn
+
+    - name: Start and enable Gunicorn
+      systemd:
+        name: gunicorn
+        state: started
+        enabled: yes
+        daemon_reload: yes
+
+    - name: Copy Nginx configuration
+      template:
+        src: nginx.conf.j2
+        dest: /etc/nginx/sites-available/flask-app
+      notify: Restart Nginx
+
+    - name: Create symbolic link for Nginx config
+      file:
+        src: /etc/nginx/sites-available/flask-app
+        dest: /etc/nginx/sites-enabled/flask-app
+        state: link
+      notify: Restart Nginx
+
+    - name: Remove default Nginx site
+      file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+      notify: Restart Nginx
+
+    - name: Start and enable Nginx
+      systemd:
+        name: nginx
+        state: started
+        enabled: yes
+
+  handlers:
+    - name: Restart Gunicorn
+      systemd:
+        name: gunicorn
+        state: restarted
+
+    - name: Restart Nginx
+      systemd:
+        name: nginx
+        state: restarted

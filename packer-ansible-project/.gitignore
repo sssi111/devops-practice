@@ -1,0 +1,9 @@
+output-*
+packer_cache/
+*.box
+*.ovf
+*.vmdk
+*.log
+.DS_Store
+variables.pkrvars.hcl
+manifest.json
